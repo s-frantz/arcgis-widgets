@@ -1,12 +1,12 @@
 {
-  "name": "Filter",
+  "name": "Multi Filter",
   "type": "widget",
   "platform": "HTML",
   "version": "2.28",
   "wabVersion": "2.28",
-  "author": "Esri R&D Center Beijing",
-  "description": "",
-  "copyright": "",
+  "author": "Silas Frantz, based on original work by Esri R&D Center Beijing",
+  "description": "An enhanced filter widget supporting multi-layer filtering from single-layer filter configuration. Forked and extended from Esri's WAB Filter widget.",
+  "copyright": "Copyright (c) Silas Frantz, based on original work by Esri",
   "license": "http://www.apache.org/licenses/LICENSE-2.0",
   "properties": {
     "keepConfigAfterMapSwitched": false,

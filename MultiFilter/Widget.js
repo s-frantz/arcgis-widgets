@@ -1,5 +1,8 @@
 ///////////////////////////////////////////////////////////////////////////
-// Copyright © Esri. All Rights Reserved.
+// MultiFilter Widget
+// Copyright © Silas Frantz. All Rights Reserved.
+//
+// Forked from Esri's Filter widget (original authors: Esri R&D Center Beijing).
 //
 // Licensed under the Apache License Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +15,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Description:
+//   MultiFilter supports complete and partial multi-layer filtering
+//   from single-layer filter configs. Forked from Esri Filter widget, 2025.
 ///////////////////////////////////////////////////////////////////////////
+
 
 define([
     'dojo/_base/declare',
@@ -52,8 +60,25 @@ define([
     esriSymbolJsonUtils, jimuSymUtils, LayerChooserFromMapWithDropbox, Filter,
     CustomFeaturelayerChooserFromMap, ToggleButton) {
 
+    function ensureArcGISAuth(serviceUrl, callback) {
+      require(['esri/IdentityManager'], function(esriId) {
+        esriId.checkSignInStatus(serviceUrl)
+          .then(function() {
+            console.log('[Filter][Auth] User is authenticated for', serviceUrl);
+            if (callback) callback();
+          })
+          .catch(function() {
+            // This will trigger the login dialog if not authenticated
+            console.log('[Filter][Auth] Prompting login for', serviceUrl);
+            esriId.signIn(serviceUrl).then(function() {
+              if (callback) callback();
+            });
+          });
+      });
+    }
+
     return declare([BaseWidget, _WidgetsInTemplateMixin], {
-      name: 'Filter',
+      name: 'MultiFilter',
       baseClass: 'jimu-widget-filter',
       //style="display:${hasValue}"
 
@@ -74,6 +99,7 @@ define([
       '</li>',
       _store: null,
       homeExtent: null, //when zoombackto option is enabled
+      _layerTreePromise: null,
 
       postMixInProperties:function(){
         this.jimuNls = window.jimuNls;
@@ -471,6 +497,530 @@ define([
         return enable;
       },
 
+      // 1. Gather the hierarchical layer structure
+      _getLayerTree: function() {
+        if (this._layerTreePromise) {
+          return this._layerTreePromise;
+        }
+
+        // Helper to extract {field_name: field_type} from info, or fetch from REST if missing
+        function getFieldTypesDictAsync(info) {
+          return new Promise(function(resolve) {
+            var fieldsArr = null;
+            if (Array.isArray(info.fields)) {
+              fieldsArr = info.fields;
+            } else if (info.layerObject && Array.isArray(info.layerObject.fields)) {
+              fieldsArr = info.layerObject.fields;
+            } else if (info.definition && Array.isArray(info.definition.fields)) {
+              fieldsArr = info.definition.fields;
+            }
+            if (fieldsArr) {
+              var dict = {};
+              fieldsArr.forEach(function(f) {
+                if (f && f.name && f.type) {
+                  dict[f.name] = f.type;
+                }
+              });
+              resolve(dict);
+            } else {
+              var url = info.url || (info.layerObject && info.layerObject.url);
+              if (url) {
+                var restUrl = url + (url.indexOf('?') === -1 ? '?f=json' : '&f=json');
+                var serviceRoot = url.replace(/\/\d+$/, ''); // Remove /0, /1, etc.
+                ensureArcGISAuth(serviceRoot, function() {
+                  require(['esri/request'], function(esriRequest) {
+                    esriRequest({
+                      url: restUrl,
+                      handleAs: 'json',
+                      withCredentials: true
+                    }).then(function(json) {
+                      var dict = {};
+                      if (json.fields && json.fields.length) {
+                        json.fields.forEach(function(f) {
+                          if (f && f.name && f.type) {
+                            dict[f.name] = f.type;
+                          }
+                        });
+                      } else {
+                        // Only warn if this is a feature layer
+                        var isFeatureLayer = false;
+                        if (typeof info.isFeatureLayer === 'function') {
+                          isFeatureLayer = info.isFeatureLayer();
+                        } else if (info.isFeatureLayer) {
+                          isFeatureLayer = true;
+                        } else if (json.type === 'Feature Layer' || json.type === 'FeatureLayer' || json.geometryType) {
+                          isFeatureLayer = true;
+                        }
+                        if (isFeatureLayer) {
+                          console.warn('[Filter][getFieldTypesDictAsync] No fields found in JSON for', restUrl, json);
+                        }
+                      }
+                      resolve(dict);
+                    }, function(err) {
+                      console.error('[Filter][getFieldTypesDictAsync] esriRequest error for', restUrl, err);
+                      resolve({});
+                    });
+                  });
+                });
+              } else {
+                // Only warn if this is a feature layer
+                var isFeatureLayer = false;
+                if (typeof info.isFeatureLayer === 'function') {
+                  isFeatureLayer = info.isFeatureLayer();
+                } else if (info.isFeatureLayer) {
+                  isFeatureLayer = true;
+                }
+                if (isFeatureLayer) {
+                  console.warn('[Filter][getFieldTypesDictAsync] No fields and no URL for info:', info);
+                }
+                resolve({});
+              }
+            }
+          });
+        }
+
+        var layerInfos = this.layerInfosObj && this.layerInfosObj.getLayerInfoArray ? this.layerInfosObj.getLayerInfoArray() : [];
+
+        // Recursively build the tree, asynchronously
+        function gatherAsync(info, parentTitle) {
+          var isFeatureLayer = false, isGroupLayer = false;
+          var type = info.layerType || (info.layerObject && info.layerObject.declaredClass) || 'Unknown';
+
+          if (
+            type === 'GroupLayer' ||
+            (info.getSubLayers && typeof info.getSubLayers === 'function' && info.getSubLayers().length > 0)
+          ) {
+            isGroupLayer = true;
+          }
+
+          if (typeof info.isFeatureLayer === 'function') {
+            isFeatureLayer = info.isFeatureLayer();
+          } else if (info.layerObject && info.layerObject.declaredClass && info.layerObject.declaredClass.indexOf('FeatureLayer') > -1) {
+            isFeatureLayer = true;
+          } else if (info.layerType && info.layerType === 'FeatureLayer') {
+            isFeatureLayer = true;
+          } else if (info.geometryType) {
+            isFeatureLayer = true;
+            type = 'esri.layers.FeatureLayer';
+          } else if (info.definition && info.definition.geometryType) {
+            isFeatureLayer = true;
+            type = 'esri.layers.FeatureLayer';
+          } else if ((info.fields && info.fields.length) || (info.definition && info.definition.fields && info.definition.fields.length)) {
+            isFeatureLayer = true;
+            type = 'esri.layers.FeatureLayer';
+          } else if (info.drawingInfo || (info.definition && info.definition.drawingInfo)) {
+            isFeatureLayer = true;
+            type = 'esri.layers.FeatureLayer';
+          } else if (
+            (typeof info.id === 'number' || !isNaN(Number(info.id))) &&
+            (info.name || info.title) &&
+            (info.type === 'Feature Layer' || (info.capabilities && info.capabilities.indexOf('Query') > -1))
+          ) {
+            isFeatureLayer = true;
+            type = 'esri.layers.FeatureLayer';
+          } else if (
+            info.layerObject && info.layerObject.url &&
+            /\/MapServer\/\d+$/.test(info.layerObject.url) &&
+            info.isTable === false
+          ) {
+            isFeatureLayer = true;
+            type = 'esri.layers.FeatureLayer';
+          }
+
+          var node = {
+            id: info.id,
+            title: info.title,
+            type: type,
+            isFeatureLayer: isFeatureLayer,
+            isGroupLayer: isGroupLayer,
+            parent: parentTitle || (info.parentLayerInfo ? info.parentLayerInfo.title : null),
+            url: info.url || (info.layerObject && info.layerObject.url),
+            children: []
+          };
+
+          return getFieldTypesDictAsync(info).then(function(fieldsDict) {
+            node.fields = fieldsDict;
+            if (isGroupLayer && info.getSubLayers && typeof info.getSubLayers === 'function') {
+              var sublayers = info.getSubLayers();
+              if (sublayers && sublayers.length > 0) {
+                return Promise.all(sublayers.map(function(sub) {
+                  return gatherAsync(sub, info.title);
+                })).then(function(children) {
+                  node.children = children;
+                  return node;
+                });
+              }
+            }
+            return node;
+          });
+        }
+
+        // Return a promise that resolves to the tree, and cache it
+        this._layerTreePromise = Promise.all(layerInfos.map(function(info) { return gatherAsync(info, null); }));
+        return this._layerTreePromise;
+      },
+
+      // 2. Log the structure recursively
+      _logLayerTree: function(tree, indent) {
+        indent = indent || '';
+        tree.forEach(function(node) {
+          var label = node.isGroupLayer ? '[Group]' : node.isFeatureLayer ? '[Feature]' : '[Other]';
+          var logObj = {
+            id: node.id,
+            title: node.title,
+            type: node.type,
+            isFeatureLayer: node.isFeatureLayer,
+            isGroupLayer: node.isGroupLayer,
+            parent: node.parent,
+            url: node.url
+          };
+          if (node.isFeatureLayer && node.fields) {
+            logObj.fields = node.fields;
+          }
+          console.log(indent + label, logObj);
+          if (node.children && node.children.length > 0) {
+            this._logLayerTree(node.children, indent + '  ');
+          }
+        }, this);
+      },
+
+      // 3. Main beefcake: _applyMultiLayerFilter
+      _applyMultiLayerFilter: function(expr, enableMapFilter, mainLayerId) {
+        this._getLayerTree().then(lang.hitch(this, function(tree) {
+
+          // Logging!
+          console.log('[MultiFilter] Layer tree structure:', tree);
+          console.log('[MultiFilter] Incoming SQL query:', expr);
+
+          // Skip if filter expression is empty or only whitespace
+          if (!expr || !expr.trim()) {
+            // Clear all filters applied by this widget for all feature layers
+            function collectFeatureLayerNodes(nodeList) {
+              var nodes = [];
+              nodeList.forEach(function(node) {
+                if (node.isFeatureLayer) {
+                  nodes.push(node);
+                }
+                if (node.children && node.children.length > 0) {
+                  nodes = nodes.concat(collectFeatureLayerNodes(node.children));
+                }
+              });
+              return nodes;
+            }
+            var featureLayerNodes = collectFeatureLayerNodes(tree);
+            featureLayerNodes.forEach(function(node) {
+              if (node.fields) {
+                // Remove the filter by passing an empty string
+                this.filterManager.applyWidgetFilter(node.id, this.id, "", false, null, this.config.zoomto);
+              }
+            }, this);
+            return;
+          }
+
+          // Detect tautology filter (e.g., 1=1, (1=1), 0=0, (0=0))
+          var normalized = expr && expr.replace(/\s+/g, '').toLowerCase();
+          if (normalized === '1=1' || normalized === '(1=1)' || normalized === '0=0' || normalized === '(0=0)') {
+            // Apply the tautology filter to all feature layers (except mainLayerId if you want to skip it)
+            function collectFeatureLayerNodes(nodeList) {
+              var nodes = [];
+              nodeList.forEach(function(node) {
+                if (node.isFeatureLayer) {
+                  nodes.push(node);
+                }
+                if (node.children && node.children.length > 0) {
+                  nodes = nodes.concat(collectFeatureLayerNodes(node.children));
+                }
+              });
+              return nodes;
+            }
+            var featureLayerNodes = collectFeatureLayerNodes(tree);
+            featureLayerNodes.forEach(function(node) {
+              if (node.fields) {
+                this.filterManager.applyWidgetFilter(node.id, this.id, expr, enableMapFilter, null, this.config.zoomto);
+              }
+            }, this);
+            return; // Skip the rest of the function
+          }
+
+          // --- Tokenizer: supports all relevant SQL operators ---
+          // --- Tokenizer: also, LOWER and UPPER as tokens ---
+          function tokenize(sql) {
+            var re = /\s*(=>|<=|>=|<>|!=|=|<|>|\bAND\b|\bOR\b|\bNOT\b|\bIS\b|\bNULL\b|\bLIKE\b|\bIN\b|\bLOWER\b|\bUPPER\b|\(|\)|,|[a-zA-Z_][a-zA-Z0-9_]*|'[^']*'|"(?:[^"]|\\")*"|\d+\.\d+|\d+)\s*/gi;
+            var tokens = [];
+            var m;
+            while ((m = re.exec(sql)) !== null) {
+              tokens.push(m[1]);
+            }
+            return tokens;
+          }
+
+          // --- Parser: builds AST for WHERE expressions ---
+          function parse(tokens) {
+            var pos = 0;
+            function peek() { return tokens[pos]; }
+            function next() { return tokens[pos++]; }
+
+            // --- Parser: handle LOWER(field) and UPPER(field) ---
+            function parseField() {
+              var token = next();
+              if ((token && token.toUpperCase() === 'LOWER') || (token && token.toUpperCase() === 'UPPER')) {
+                var func = token.toUpperCase();
+                if (next() !== '(') throw new Error('Expected ( after ' + func);
+                var field = next();
+                if (next() !== ')') throw new Error('Expected ) after ' + func + '(' + field);
+                return { type: 'FIELD', field: field, func: func }; // Mark as wrapped
+              }
+              return { type: 'FIELD', field: token };
+            }
+
+            function parsePrimary() {
+              if (peek() === '(') {
+                next();
+                var expr = parseExpr();
+                if (next() !== ')') throw new Error('Expected )');
+                return expr;
+              }
+              if (peek() && peek().toUpperCase() === 'NOT') {
+                next();
+                return { type: 'NOT', expr: parsePrimary() };
+              }
+              var fieldObj = parseField();
+              var field = fieldObj.field;
+              var fieldFunc = fieldObj.func; // 'LOWER' or 'UPPER' or undefined
+              var op = next();
+              if (!op) return { type: 'FIELD', field: field };
+              op = op.toUpperCase();
+
+              // IS [NOT] NULL
+              if (op === 'IS') {
+                var maybeNot = peek() && peek().toUpperCase() === 'NOT';
+                if (maybeNot) next();
+                var maybeNull = peek() && peek().toUpperCase() === 'NULL';
+                if (maybeNull) next();
+                if (maybeNot && maybeNull) {
+                  return { type: 'IS NOT NULL', field: field };
+                } else if (maybeNull) {
+                  return { type: 'IS NULL', field: field };
+                }
+                // IS [NOT] <value>
+                var value = next();
+                return { type: maybeNot ? 'IS NOT' : 'IS', field: field, value: value };
+              }
+              // LIKE, NOT LIKE
+              if (op === 'LIKE' || (op === 'NOT' && tokens[pos] && tokens[pos].toUpperCase() === 'LIKE')) {
+                if (op === 'NOT') next();
+                var value = next();
+                return { type: op === 'LIKE' ? 'LIKE' : 'NOT LIKE', field: field, value: value };
+              }
+              // IN, NOT IN
+              if (op === 'IN' || (op === 'NOT' && tokens[pos] && tokens[pos].toUpperCase() === 'IN')) {
+                if (op === 'NOT') next();
+                if (next() !== '(') throw new Error('Expected ( after IN');
+                var vals = [];
+                while (peek() && peek() !== ')') {
+                  var v = next();
+                  if (v === ',') continue;
+                  vals.push(v);
+                }
+                if (next() !== ')') throw new Error('Expected ) after IN values');
+                return { type: op === 'IN' ? 'IN' : 'NOT IN', field: field, values: vals };
+              }
+              // Standard binary op
+              var value = next();
+              return { type: 'COND', field: field, op: op, value: value, func: fieldFunc };
+            }
+
+            function parseAnd() {
+              var left = parsePrimary();
+              while (peek() && peek().toUpperCase() === 'AND') {
+                next();
+                var right = parsePrimary();
+                left = { type: 'AND', left: left, right: right };
+              }
+              return left;
+            }
+
+            function parseOr() {
+              var left = parseAnd();
+              while (peek() && peek().toUpperCase() === 'OR') {
+                next();
+                var right = parseAnd();
+                left = { type: 'OR', left: left, right: right };
+              }
+              return left;
+            }
+
+            function parseExpr() {
+              return parseOr();
+            }
+
+            return parseExpr();
+          }
+
+          // --- Prune AST: remove nodes referencing missing fields, preserve logic ---
+            function prune(ast, fieldKeys) {
+              if (!ast) return null;
+              var fieldName = ast.field;
+              if (ast.func) {
+                fieldName = ast.field; // Use the inner field name for matching
+              }
+            switch (ast.type) {
+              case 'AND':
+              case 'OR': {
+                var left = prune(ast.left, fieldKeys);
+                var right = prune(ast.right, fieldKeys);
+                if (left && right) return { type: ast.type, left: left, right: right };
+                if (ast.type === 'AND') return left || right;
+                if (ast.type === 'OR') return left || right;
+                return null;
+              }
+              case 'NOT':
+                var expr = prune(ast.expr, fieldKeys);
+                return expr ? { type: 'NOT', expr: expr } : null;
+              case 'COND':
+              case 'LIKE':
+              case 'NOT LIKE':
+              case 'IN':
+              case 'NOT IN':
+              case 'IS':
+              case 'IS NOT':
+              case 'IS NULL':
+              case 'IS NOT NULL':
+                if (fieldKeys.indexOf(fieldName.toLowerCase()) !== -1) return ast;
+                return null;
+              case 'FIELD':
+                if (fieldKeys.indexOf(fieldName.toLowerCase()) !== -1) return ast;
+                return null;
+              default:
+                return null;
+            }
+          }
+
+          // --- Rebuild SQL from AST ---
+          function toSQL(ast) {
+            if (!ast) return '';
+            switch (ast.type) {
+              case 'AND':
+                return '(' + toSQL(ast.left) + ' AND ' + toSQL(ast.right) + ')';
+              case 'OR':
+                return '(' + toSQL(ast.left) + ' OR ' + toSQL(ast.right) + ')';
+              case 'NOT':
+                return '(NOT ' + toSQL(ast.expr) + ')';
+              case 'COND':
+                // If there's a func, wrap the field
+                var fieldExpr = ast.func ? (ast.func + '(' + ast.field + ')') : ast.field;
+                return fieldExpr + ' ' + ast.op + ' ' + ast.value;
+              case 'LIKE':
+              case 'NOT LIKE':
+              case 'IN':
+              case 'NOT IN':
+              case 'IS':
+              case 'IS NOT':
+              case 'IS NULL':
+              case 'IS NOT NULL':
+                var fieldExpr = ast.func ? (ast.func + '(' + ast.field + ')') : ast.field;
+                // Use fieldExpr in all these cases
+                switch (ast.type) {
+                  case 'LIKE': return fieldExpr + ' LIKE ' + ast.value;
+                  case 'NOT LIKE': return fieldExpr + ' NOT LIKE ' + ast.value;
+                  case 'IN': return fieldExpr + ' IN (' + ast.values.join(', ') + ')';
+                  case 'NOT IN': return fieldExpr + ' NOT IN (' + ast.values.join(', ') + ')';
+                  case 'IS': return fieldExpr + ' IS ' + ast.value;
+                  case 'IS NOT': return fieldExpr + ' IS NOT ' + ast.value;
+                  case 'IS NULL': return fieldExpr + ' IS NULL';
+                  case 'IS NOT NULL': return fieldExpr + ' IS NOT NULL';
+                }
+              case 'FIELD':
+                return ast.func ? (ast.func + '(' + ast.field + ')') : ast.field;
+              default:
+                return '';
+            }
+          }
+
+          function collectFeatureLayerNodes(nodeList, excludeId) {
+            var nodes = [];
+            nodeList.forEach(function(node) {
+              if (node.isFeatureLayer && node.id !== excludeId) {
+                nodes.push(node);
+              }
+              if (node.children && node.children.length > 0) {
+                nodes = nodes.concat(collectFeatureLayerNodes(node.children, excludeId));
+              }
+            });
+            return nodes;
+          }
+
+          // --- Main logic: all runs after tree is ready ---
+          var tokens, ast;
+          try {
+            tokens = tokenize(expr);
+            ast = parse(tokens);
+          } catch (e) {
+            console.error('[MultiFilter] Failed to parse SQL:', expr, e);
+            return;
+          }
+
+          // Field extraction for logging
+          function collectFields(ast, arr) {
+            if (!ast) return;
+            switch (ast.type) {
+              case 'AND':
+              case 'OR':
+                collectFields(ast.left, arr);
+                collectFields(ast.right, arr);
+                break;
+              case 'NOT':
+                collectFields(ast.expr, arr);
+                break;
+              case 'COND':
+              case 'LIKE':
+              case 'NOT LIKE':
+              case 'IN':
+              case 'NOT IN':
+              case 'IS':
+              case 'IS NOT':
+              case 'IS NULL':
+              case 'IS NOT NULL':
+              case 'FIELD':
+                // Always push the inner field name, not the wrapper (LOWER/UPPER)
+                arr.push(ast.field);
+                break;
+            }
+          }
+          var allFields = [];
+          collectFields(ast, allFields);
+          allFields = allFields.map(function(f) { return f && f.toLowerCase(); })
+            .filter(function(f, i, arr) { return f && arr.indexOf(f) === i; });
+          console.log('[MultiFilter] Filter fields:', allFields);
+
+          var featureLayerNodes = collectFeatureLayerNodes(tree, mainLayerId);
+
+          featureLayerNodes.forEach(function(node) {
+            if (!node.fields) return;
+            var fieldKeys = Object.keys(node.fields).map(function(f) { return f.toLowerCase(); });
+
+            var prunedAst = prune(ast, fieldKeys);
+            var partialExpr = toSQL(prunedAst);
+
+            // Find missing fields for logging
+            var missingFields = allFields.filter(function(f) {
+              return fieldKeys.indexOf(f) === -1;
+            });
+
+            if (partialExpr && partialExpr !== '' && partialExpr !== '()') {
+              if (missingFields.length > 0) {
+                console.warn('[MultiFilter] Layer', node.id, 'is missing fields:', missingFields, '| Applying partial filter:', partialExpr);
+              } else {
+                console.log('[MultiFilter] Applying filter to layer:', node.id, '| Expression:', partialExpr);
+              }
+              this.filterManager.applyWidgetFilter(node.id, this.id, partialExpr, enableMapFilter, null, this.config.zoomto);
+            } else {
+              console.warn('[MultiFilter] Layer', node.id, 'has no matching fields for filter. Missing fields:', missingFields);
+            }
+          }, this);
+        }));
+      },
+
       _setItemFilter: function(layerId, idx, expr, enableMapFilter) {
         if(!this._store[layerId]){
           return true;
@@ -558,6 +1108,7 @@ define([
         var layerFilterExpr = this._getExpr(layerId);
         var enableMapFilter = this._getMapFilterControl(layerId);
         this.filterManager.applyWidgetFilter(layerId, this.id, layerFilterExpr, enableMapFilter, null, this.config.zoomto);
+        this._applyMultiLayerFilter(layerFilterExpr, enableMapFilter, layerId);
 
         this._afterFilterApplied(filterObj.layerId, !node.toggleButton.checked);
       },
@@ -644,6 +1195,7 @@ define([
           var layerFilterExpr = this._getExpr(layerId);
           var enableMapFilter = this._getMapFilterControl(layerId);
           this.filterManager.applyWidgetFilter(layerId, this.id, layerFilterExpr, enableMapFilter, null, this.config.zoomto);
+          this._applyMultiLayerFilter(layerFilterExpr, enableMapFilter, layerId);
 
           this._afterFilterApplied(filterObj.layerId);
         }
@@ -926,6 +1478,7 @@ define([
         }
         if(!isChecked){
           this.filterManager.applyWidgetFilter(this.selectedLayer.id, this.id + '-custom-filter', '1=1', true, null, this.config.zoomto);
+          this._applyMultiLayerFilter('1=1', true, this.selectedLayer.id);
           this._afterFilterApplied(this.selectedLayer.id, true);
         }else{
           this._applyCustomFilter();
@@ -948,6 +1501,7 @@ define([
           return;
         }
         this.filterManager.applyWidgetFilter(this.selectedLayer.id, wFilterId, newExpr, true, null, this.config.zoomto);
+        this._applyMultiLayerFilter(newExpr, true, this.selectedLayer.id);
         this._afterFilterApplied(this.selectedLayer.id);
       },
 
@@ -965,6 +1519,7 @@ define([
           for (var p in this._store) {
             if (p) {
               this.filterManager.applyWidgetFilter(p, this.id, "", null, null, this.config.zoomto);
+              this._applyMultiLayerFilter("", null, p);
             }
           }
         }
