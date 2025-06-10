@@ -1,6 +1,6 @@
 define({
   root: ({
-    _widgetLabel: "Filter",
+    _widgetLabel: "Multi Filter",
     toggleTip: "Click to show/hide filter settings",
     toggleOn: "Press toggle button to turn on current filter",
     toggleOff: "Press toggle button to turn off current filter",
