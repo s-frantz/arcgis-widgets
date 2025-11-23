@@ -745,7 +745,7 @@ define([
           // --- Tokenizer: supports all relevant SQL operators ---
           // --- Tokenizer: also, LOWER and UPPER as tokens ---
           function tokenize(sql) {
-            var re = /\s*(=>|<=|>=|<>|!=|=|<|>|\bAND\b|\bOR\b|\bNOT\b|\bIS\b|\bNULL\b|\bLIKE\b|\bIN\b|\bLOWER\b|\bUPPER\b|\(|\)|,|[a-zA-Z_][a-zA-Z0-9_]*|'[^']*'|"(?:[^"]|\\")*"|\d+\.\d+|\d+)\s*/gi;
+            var re = /\s*(=>|<=|>=|<>|!=|=|<|>|\bAND\b|\bOR\b|\bNOT\b|\bIS\b|\bNULL\b|\bLIKE\b|\bIN\b|\bLOWER\b|\bUPPER\b|\btimestamp\b|\(|\)|,|[a-zA-Z_][a-zA-Z0-9_]*|'[^']*'|"(?:[^"]|\\")*"|\d+\.\d+|\d+)\s*/gi;
             var tokens = [];
             var m;
             while ((m = re.exec(sql)) !== null) {
@@ -827,6 +827,12 @@ define([
               }
               // Standard binary op
               var value = next();
+              // Handle timestamp literal: if value is 'timestamp', combine with next token (the quoted date)
+              if (value && value.toLowerCase() === 'timestamp') {
+                var tsValue = next();
+                if (!tsValue || !/^'[^']*'$/.test(tsValue)) throw new Error('Expected timestamp literal');
+                value = value + ' ' + tsValue;
+              }
               return { type: 'COND', field: field, op: op, value: value, func: fieldFunc };
             }
 
