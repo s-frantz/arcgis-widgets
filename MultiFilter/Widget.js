@@ -77,6 +77,30 @@ define([
       });
     }
 
+    // Example: Only include "parcels" and all "mapping" sublayers except "project"
+    const FILTER_LAYER_SCOPE = [
+      '^parcels$',
+      '^mapping/(?!project$).*'
+    ];
+
+    function layerMatchesScope(layerPath) {
+      return FILTER_LAYER_SCOPE.some(reStr => new RegExp(reStr, 'i').test(layerPath));
+    }
+
+    function collectFeatureLayerNodes(nodeList, excludeId) {
+      var nodes = [];
+      nodeList.forEach(function(node) {
+        var path = node.parent ? (node.parent + '/' + node.title) : node.title;
+        if (node.isFeatureLayer && node.id !== excludeId && layerMatchesScope(path)) {
+          nodes.push(node);
+        }
+        if (node.children && node.children.length > 0) {
+          nodes = nodes.concat(collectFeatureLayerNodes(node.children, excludeId));
+        }
+      });
+      return nodes;
+    }
+
     return declare([BaseWidget, _WidgetsInTemplateMixin], {
       name: 'MultiFilter',
       baseClass: 'jimu-widget-filter',
@@ -694,19 +718,6 @@ define([
 
           // Skip if filter expression is empty or only whitespace
           if (!expr || !expr.trim()) {
-            // Clear all filters applied by this widget for all feature layers
-            function collectFeatureLayerNodes(nodeList) {
-              var nodes = [];
-              nodeList.forEach(function(node) {
-                if (node.isFeatureLayer) {
-                  nodes.push(node);
-                }
-                if (node.children && node.children.length > 0) {
-                  nodes = nodes.concat(collectFeatureLayerNodes(node.children));
-                }
-              });
-              return nodes;
-            }
             var featureLayerNodes = collectFeatureLayerNodes(tree);
             featureLayerNodes.forEach(function(node) {
               if (node.fields) {
@@ -721,18 +732,6 @@ define([
           var normalized = expr && expr.replace(/\s+/g, '').toLowerCase();
           if (normalized === '1=1' || normalized === '(1=1)' || normalized === '0=0' || normalized === '(0=0)') {
             // Apply the tautology filter to all feature layers (except mainLayerId if you want to skip it)
-            function collectFeatureLayerNodes(nodeList) {
-              var nodes = [];
-              nodeList.forEach(function(node) {
-                if (node.isFeatureLayer) {
-                  nodes.push(node);
-                }
-                if (node.children && node.children.length > 0) {
-                  nodes = nodes.concat(collectFeatureLayerNodes(node.children));
-                }
-              });
-              return nodes;
-            }
             var featureLayerNodes = collectFeatureLayerNodes(tree);
             featureLayerNodes.forEach(function(node) {
               if (node.fields) {
@@ -941,19 +940,6 @@ define([
               default:
                 return '';
             }
-          }
-
-          function collectFeatureLayerNodes(nodeList, excludeId) {
-            var nodes = [];
-            nodeList.forEach(function(node) {
-              if (node.isFeatureLayer && node.id !== excludeId) {
-                nodes.push(node);
-              }
-              if (node.children && node.children.length > 0) {
-                nodes = nodes.concat(collectFeatureLayerNodes(node.children, excludeId));
-              }
-            });
-            return nodes;
           }
 
           // --- Main logic: all runs after tree is ready ---
