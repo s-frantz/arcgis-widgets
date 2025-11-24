@@ -81,7 +81,7 @@ define([
     const FILTER_LAYER_SCOPE = [
       '^parcels$',
       '^mapping/(?!project$).*'
-    ];
+    ]; // ['.*']; // all layers
 
     function layerMatchesScope(layerPath) {
       return FILTER_LAYER_SCOPE.some(reStr => new RegExp(reStr, 'i').test(layerPath));
