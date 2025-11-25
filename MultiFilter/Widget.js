@@ -77,11 +77,22 @@ define([
       });
     }
 
-    // Example: Only include "parcels" and all "mapping" sublayers except "project"
-    const FILTER_LAYER_SCOPE = [
-      '^parcels$',
-      '^mapping/(?!project$).*'
-    ]; // ['.*']; // all layers
+    // Set initial / default FILTER_LAYER_SCOPE (all layers)
+    var FILTER_LAYER_SCOPE = ['.*'];
+
+    // Parse filterLayerScope from config (comma-separated string to array)
+    // e.g., "^parcels$, ^mapping/.*"  -->  ["^parcels$", "^mapping/.*"]
+    function getFilterLayerScope(config) {
+      // Use default ['.*'] if not set or empty
+      console.log(config); // could remove, but helpful for devs
+      if (!config || !config.filterLayerScope || !config.filterLayerScope.trim()) {
+        return ['.*'];
+      }
+      return config.filterLayerScope
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+    }
 
     function layerMatchesScope(layerPath) {
       return FILTER_LAYER_SCOPE.some(reStr => new RegExp(reStr, 'i').test(layerPath));
@@ -135,6 +146,9 @@ define([
         this.layerInfosObj = LayerInfos.getInstanceSync();
         this.filterUtils = new FilterUtils();
         this.filterManager = FilterManager.getInstance();
+
+        // Now config is available, update FILTER_LAYER_SCOPE
+        FILTER_LAYER_SCOPE = getFilterLayerScope(this.config);
 
         this.initFilterActions();
 
