@@ -59,7 +59,8 @@ function(on, query, html, lang, array, declare, _WidgetsInTemplateMixin, esriLan
         allowCustom: config.allowCustom,
         allowResetAll: config.allowResetAll,
         allowTurnOffAll: config.allowTurnOffAll,
-        filters: []
+        filters: [],
+        filterLayerScope: config.filterLayerScope 
       };
       validConfig.filters = array.filter(config.filters, lang.hitch(this, function(singleConfig) {
         if (singleConfig.layerId) {
@@ -74,6 +75,17 @@ function(on, query, html, lang, array, declare, _WidgetsInTemplateMixin, esriLan
 
     postCreate: function(){
       this.inherited(arguments);
+      // Add input for filterLayerScope
+      this.filterLayerScopeInput = html.create("textarea", {
+        "class": "filter-layer-scope-input",
+        "rows": 1,
+        "style": "width:100%; margin-top:3px;",
+        "placeholder": "Enter regex patterns, e.g. '^parcels$', '^mapping/.*'"
+      }, this.domNode);
+      // Restore value from config if present
+      if(this.config && this.config.filterLayerScope){
+        this.filterLayerScopeInput.value = this.config.filterLayerScope;
+      }
       this.noTaskTip.innerHTML = this.noTaskNls;
       this.groupByLayerTip.innerHTML = this.nls.groupByLayerTip || "";
       this.zoomtoTip.innerHTML = this.nls.zoomtoTip || "";
@@ -223,6 +235,10 @@ function(on, query, html, lang, array, declare, _WidgetsInTemplateMixin, esriLan
       this.cbxAllowCustom.setValue(!!config.allowCustom);
       this.cbxAllowResetAll.setValue(!!config.allowResetAll);
       this.cbxAllowTurnOffAll.setValue(!!config.allowTurnOffAll);
+      // Set filterLayerScope to input
+      if(config.filterLayerScope){
+        this.filterLayerScopeInput.value = config.filterLayerScope;
+      }
       var firstTarget = null;
       array.forEach(config.filters, lang.hitch(this, function(singleConfig, index){
         var target = this._createTarget(singleConfig.name);
@@ -258,6 +274,8 @@ function(on, query, html, lang, array, declare, _WidgetsInTemplateMixin, esriLan
       config.filters = array.map(targets, lang.hitch(this, function(target){
         return target.singleConfig;
       }));
+      // Get filterLayerScope from input
+      config.filterLayerScope = this.filterLayerScopeInput.value;
       return config;
     },
 

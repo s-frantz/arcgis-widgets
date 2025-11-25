@@ -77,6 +77,41 @@ define([
       });
     }
 
+    // Set initial / default FILTER_LAYER_SCOPE (all layers)
+    var FILTER_LAYER_SCOPE = ['.*'];
+
+    // Parse filterLayerScope from config (comma-separated string to array)
+    // e.g., "^parcels$, ^mapping/.*"  -->  ["^parcels$", "^mapping/.*"]
+    function getFilterLayerScope(config) {
+      // Use default ['.*'] if not set or empty
+      console.log(config); // could remove, but helpful for devs
+      if (!config || !config.filterLayerScope || !config.filterLayerScope.trim()) {
+        return ['.*'];
+      }
+      return config.filterLayerScope
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+    }
+
+    function layerMatchesScope(layerPath) {
+      return FILTER_LAYER_SCOPE.some(reStr => new RegExp(reStr, 'i').test(layerPath));
+    }
+
+    function collectFeatureLayerNodes(nodeList, excludeId) {
+      var nodes = [];
+      nodeList.forEach(function(node) {
+        var path = node.parent ? (node.parent + '/' + node.title) : node.title;
+        if (node.isFeatureLayer && node.id !== excludeId && layerMatchesScope(path)) {
+          nodes.push(node);
+        }
+        if (node.children && node.children.length > 0) {
+          nodes = nodes.concat(collectFeatureLayerNodes(node.children, excludeId));
+        }
+      });
+      return nodes;
+    }
+
     return declare([BaseWidget, _WidgetsInTemplateMixin], {
       name: 'MultiFilter',
       baseClass: 'jimu-widget-filter',
@@ -111,6 +146,9 @@ define([
         this.layerInfosObj = LayerInfos.getInstanceSync();
         this.filterUtils = new FilterUtils();
         this.filterManager = FilterManager.getInstance();
+
+        // Now config is available, update FILTER_LAYER_SCOPE
+        FILTER_LAYER_SCOPE = getFilterLayerScope(this.config);
 
         this.initFilterActions();
 
@@ -694,19 +732,6 @@ define([
 
           // Skip if filter expression is empty or only whitespace
           if (!expr || !expr.trim()) {
-            // Clear all filters applied by this widget for all feature layers
-            function collectFeatureLayerNodes(nodeList) {
-              var nodes = [];
-              nodeList.forEach(function(node) {
-                if (node.isFeatureLayer) {
-                  nodes.push(node);
-                }
-                if (node.children && node.children.length > 0) {
-                  nodes = nodes.concat(collectFeatureLayerNodes(node.children));
-                }
-              });
-              return nodes;
-            }
             var featureLayerNodes = collectFeatureLayerNodes(tree);
             featureLayerNodes.forEach(function(node) {
               if (node.fields) {
@@ -721,18 +746,6 @@ define([
           var normalized = expr && expr.replace(/\s+/g, '').toLowerCase();
           if (normalized === '1=1' || normalized === '(1=1)' || normalized === '0=0' || normalized === '(0=0)') {
             // Apply the tautology filter to all feature layers (except mainLayerId if you want to skip it)
-            function collectFeatureLayerNodes(nodeList) {
-              var nodes = [];
-              nodeList.forEach(function(node) {
-                if (node.isFeatureLayer) {
-                  nodes.push(node);
-                }
-                if (node.children && node.children.length > 0) {
-                  nodes = nodes.concat(collectFeatureLayerNodes(node.children));
-                }
-              });
-              return nodes;
-            }
             var featureLayerNodes = collectFeatureLayerNodes(tree);
             featureLayerNodes.forEach(function(node) {
               if (node.fields) {
@@ -745,7 +758,7 @@ define([
           // --- Tokenizer: supports all relevant SQL operators ---
           // --- Tokenizer: also, LOWER and UPPER as tokens ---
           function tokenize(sql) {
-            var re = /\s*(=>|<=|>=|<>|!=|=|<|>|\bAND\b|\bOR\b|\bNOT\b|\bIS\b|\bNULL\b|\bLIKE\b|\bIN\b|\bLOWER\b|\bUPPER\b|\(|\)|,|[a-zA-Z_][a-zA-Z0-9_]*|'[^']*'|"(?:[^"]|\\")*"|\d+\.\d+|\d+)\s*/gi;
+            var re = /\s*(=>|<=|>=|<>|!=|=|<|>|\bAND\b|\bOR\b|\bNOT\b|\bIS\b|\bNULL\b|\bLIKE\b|\bIN\b|\bLOWER\b|\bUPPER\b|\btimestamp\b|\(|\)|,|[a-zA-Z_][a-zA-Z0-9_]*|'[^']*'|"(?:[^"]|\\")*"|\d+\.\d+|\d+)\s*/gi;
             var tokens = [];
             var m;
             while ((m = re.exec(sql)) !== null) {
@@ -827,6 +840,12 @@ define([
               }
               // Standard binary op
               var value = next();
+              // Handle timestamp literal: if value is 'timestamp', combine with next token (the quoted date)
+              if (value && value.toLowerCase() === 'timestamp') {
+                var tsValue = next();
+                if (!tsValue || !/^'[^']*'$/.test(tsValue)) throw new Error('Expected timestamp literal');
+                value = value + ' ' + tsValue;
+              }
               return { type: 'COND', field: field, op: op, value: value, func: fieldFunc };
             }
 
@@ -935,19 +954,6 @@ define([
               default:
                 return '';
             }
-          }
-
-          function collectFeatureLayerNodes(nodeList, excludeId) {
-            var nodes = [];
-            nodeList.forEach(function(node) {
-              if (node.isFeatureLayer && node.id !== excludeId) {
-                nodes.push(node);
-              }
-              if (node.children && node.children.length > 0) {
-                nodes = nodes.concat(collectFeatureLayerNodes(node.children, excludeId));
-              }
-            });
-            return nodes;
           }
 
           // --- Main logic: all runs after tree is ready ---
